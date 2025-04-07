@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <!-- Block zooming and ensure viewport fills screen -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>VÔ HIỆU HOÁ</title> <!-- Changed title for effect -->
+    <style>
+        /* --- CSS Starts Here --- */
+        html, body {
+            overscroll-behavior: none; /* Prevent pull-to-refresh/overscroll effects */
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden !important; /* Force hide scrollbars */
+            background-color: #000; /* Ensure black background */
+            cursor: none; /* Hide the cursor */
+        }
+
+        body.unlocked {
+             overflow: auto !important; /* Restore scroll on unlock if needed */
+             cursor: default; /* Restore cursor */
+        }
+
+        #lockOverlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000; /* Solid black background */
+            color: #ffc107; /* Warning yellow/orange text */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 2147483647; /* Max z-index */
+            text-align: center;
+            padding: 20px;
+            box-sizing: border-box;
+            opacity: 0; /* Start hidden */
+            visibility: hidden;
+            transition: opacity 0.3s ease-in;
+             /* Prevent text selection */
+            user-select: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            /* Prevent drag */
+            -webkit-user-drag: none;
+        }
+
+        #lockOverlay.visible {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        #lockOverlay .content {
+            max-width: 90%;
+        }
+
+        #lockOverlay h1 {
+            font-size: 1.6em;
+            margin-bottom: 20px;
+            color: #dc3545; /* Red color for heading */
+            text-shadow: 0 0 5px #ff0000;
+        }
+
+        #lockOverlay p {
+            font-size: 1em;
+            margin: 15px 0;
+            color: #e9ecef; /* Lighter text */
+        }
+
+        #lockOverlay .timer {
+            font-size: 2em;
+            font-weight: bold;
+            color: #fff;
+            margin: 25px 0;
+            letter-spacing: 2px;
+             text-shadow: 0 0 8px #ffc107;
+        }
+
+        #lockOverlay .note {
+             display: none; /* Hide the note */
+        }
+
+        /* Hide instructions visually (still needed for logic reference if any) */
+        .instructions {
+            display: none !important;
+        }
+
+        /* Media query for smaller screens */
+        @media (max-width: 600px) {
+             #lockOverlay h1 { font-size: 1.3em; }
+             #lockOverlay p { font-size: 0.9em; }
+             #lockOverlay .timer { font-size: 1.6em; }
+        }
+        /* --- CSS Ends Here --- */
+    </style>
+</head>
+<body class=""> <!-- Start without 'unlocked' class -->
+
+    <!-- Overlay is present but initially hidden via CSS opacity/visibility -->
+    <div id="lockOverlay">
+        <div class="content">
+            <h1>TRUY CẬP BỊ TỪ CHỐI</h1>
+            <p>XÁC THỰC LẠI SAU:</p>
+            <p class="timer"><span id="countdownTimer">100:00:00</span></p>
+            <!-- Instructions kept hidden -->
+            <p id="mobileInstructions" class="instructions hidden"></p>
+            <p id="desktopInstructions" class="instructions hidden"></p>
+             <!-- Note removed from display -->
+        </div>
+    </div>
+
+    <!-- Optional: Placeholder for content after unlock -->
+    <!-- <div id="unlockedContent" style="display: none; padding: 20px;">
+        <h1>Unlocked!</h1>
+        <p>You can now use the page.</p>
+    </div> -->
+
+
+    <script>
+        // --- JavaScript Starts Here ---
+        const lockOverlay = document.getElementById('lockOverlay');
+        const countdownTimer = document.getElementById('countdownTimer');
+        const bodyElement = document.body;
+
+        let timerInterval = null;
+        let targetTime = 0;
+        let isLocked = false;
+        let tapCount = 0;
+        let wakeLockSentinel = null;
+
+        // Debounce tap counter reset
+        let tapResetTimeout = null;
+        const TAP_TIMEOUT_MS = 800; // Reset taps if no tap within 800ms
+
+        const isMobile = navigator.maxTouchPoints > 0 || /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+        // --- Wake Lock (Keep Screen On) ---
+        const requestWakeLock = async () => {
+             if ('wakeLock' in navigator && isMobile) { // Only request on mobile
+                try {
+                    if (document.visibilityState === 'visible') {
+                        await releaseWakeLock(); // Release previous if any
+                        wakeLockSentinel = await navigator.wakeLock.request('screen');
+                        wakeLockSentinel.addEventListener('release', () => {
+                            console.log('Wake Lock released by system.');
+                            wakeLockSentinel = null; // Important for re-acquisition logic
+                        });
+                        console.log('Wake Lock active.');
+                    }
+                } catch (err) {
+                    console.error(`Wake Lock Request Error: ${err.name}, ${err.message}`);
+                    wakeLockSentinel = null;
+                }
+            }
+        };
+
+        const releaseWakeLock = async () => {
+            if (wakeLockSentinel && !wakeLockSentinel.released) {
+                try { await wakeLockSentinel.release(); console.log('Wake Lock released.'); }
+                catch (err) { console.error(`Wake Lock Release Error: ${err.name}, ${err.message}`); }
+                finally { wakeLockSentinel = null; }
+            }
+        };
+
+        // --- Timer Logic ---
+        function formatTime(milliseconds) {
+            if (milliseconds < 0) milliseconds = 0;
+            let totalSeconds = Math.floor(milliseconds / 1000);
+            let hours = Math.floor(totalSeconds / 3600);
+            let minutes = Math.floor((totalSeconds % 3600) / 60);
+            let seconds = totalSeconds % 60;
+            return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        }
+
+        function updateTimer() {
+            const remainingTime = targetTime - Date.now();
+            if (remainingTime <= 0) {
+                countdownTimer.textContent = "00:00:00";
+                unlockDevice();
+            } else {
+                countdownTimer.textContent = formatTime(remainingTime);
+            }
+        }
+
+        function startCountdown() {
+            clearInterval(timerInterval);
+            targetTime = Date.now() + (100 * 60 * 60 * 1000); // 100 hours
+            // targetTime = Date.now() + (25 * 1000); // TEST: 25 seconds
+            updateTimer();
+            timerInterval = setInterval(updateTimer, 1000);
+        }
+
+        // --- Event Handlers to Block Interaction ---
+        function blockEvent(event) {
+            if (isLocked) {
+                event.preventDefault();
+                event.stopPropagation(); // Stop event from propagating further
+                return false; // For older browsers
+            }
+        }
+
+         function handleKeyDown(event) {
+            if (!isLocked) return;
+
+            // Allow ONLY Spacebar on Desktop for unlocking
+            if (!isMobile && (event.key === ' ' || event.code === 'Space')) {
+                 event.preventDefault(); // Prevent default space action (scroll)
+                 event.stopPropagation();
+                 unlockDevice();
+                 return; // Allow unlock
+            }
+
+            // Block ALL other keys when locked
+            console.log(`Blocked keydown: ${event.key}`); // For debugging
+            event.preventDefault();
+            event.stopPropagation();
+            // Extra caution: try to block specific problematic keys
+            if (['Escape', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12', 'Tab', 'Alt', 'Control', 'Meta'].includes(event.key)) {
+                 // Already prevented, but good practice
+            }
+             return false;
+        }
+
+        function handleTouchStart(event) {
+             if (!isLocked || !isMobile) return;
+
+             event.preventDefault(); // Crucial to prevent default touch actions
+             event.stopPropagation();
+
+             // Debounced Tap Counting
+             clearTimeout(tapResetTimeout); // Clear previous reset timer
+             tapCount++;
+             console.log(`Tap count: ${tapCount}`);
+
+             if (tapCount >= 3) {
+                 unlockDevice();
+             } else {
+                 // Reset tap count if user waits too long between taps
+                 tapResetTimeout = setTimeout(() => {
+                     console.log('Tap count reset due to timeout.');
+                     tapCount = 0;
+                 }, TAP_TIMEOUT_MS);
+             }
+            return false;
+        }
+
+        // --- Lock/Unlock Logic ---
+        async function lockDevice() {
+            if (isLocked) return;
+            console.log("Initiating LOCKDOWN...");
+            isLocked = true;
+            tapCount = 0;
+            bodyElement.classList.remove('unlocked'); // Ensure body is not styled as unlocked
+            lockOverlay.classList.add('visible'); // Show overlay
+
+            // Add Aggressive Event Blockers
+            document.addEventListener('keydown', handleKeyDown, { capture: true });
+            document.addEventListener('touchstart', handleTouchStart, { capture: true, passive: false }); // Need passive: false for preventDefault
+            document.addEventListener('contextmenu', blockEvent, { capture: true }); // Block right-click
+            document.addEventListener('selectstart', blockEvent, { capture: true }); // Block text selection
+            document.addEventListener('dragstart', blockEvent, { capture: true });   // Block dragging
+            // Attempt to block clicks/mouse events too (might interfere with tap on some setups, but adds desktop blocking)
+             document.addEventListener('mousedown', blockEvent, { capture: true });
+             document.addEventListener('mouseup', blockEvent, { capture: true });
+             document.addEventListener('click', blockEvent, { capture: true });
+
+            // Attempt to prevent leaving the page
+            window.addEventListener('beforeunload', handleBeforeUnload);
+
+            // Try to keep screen on (Mobile)
+             await requestWakeLock();
+
+            startCountdown();
+            console.log("LOCKDOWN ACTIVE.");
+        }
+
+        async function unlockDevice() {
+            if (!isLocked) return;
+            console.log("Attempting to UNLOCK...");
+            isLocked = false;
+
+            clearInterval(timerInterval);
+            timerInterval = null;
+            clearTimeout(tapResetTimeout); // Clear tap reset timer
+
+            lockOverlay.classList.remove('visible'); // Hide overlay
+            bodyElement.classList.add('unlocked'); // Add class to body for potential style changes (cursor, overflow)
+
+            // Remove ALL Event Blockers
+            document.removeEventListener('keydown', handleKeyDown, { capture: true });
+            document.removeEventListener('touchstart', handleTouchStart, { capture: true, passive: false });
+            document.removeEventListener('contextmenu', blockEvent, { capture: true });
+            document.removeEventListener('selectstart', blockEvent, { capture: true });
+            document.removeEventListener('dragstart', blockEvent, { capture: true });
+            document.removeEventListener('mousedown', blockEvent, { capture: true });
+            document.removeEventListener('mouseup', blockEvent, { capture: true });
+            document.removeEventListener('click', blockEvent, { capture: true });
+            window.removeEventListener('beforeunload', handleBeforeUnload);
+
+            // Release screen lock
+            await releaseWakeLock();
+
+            countdownTimer.textContent = "100:00:00"; // Reset visual timer
+            console.log("Device UNLOCKED (within page constraints).");
+
+            // Optional: Show unlocked content
+            // const unlockedContent = document.getElementById('unlockedContent');
+            // if (unlockedContent) unlockedContent.style.display = 'block';
+        }
+
+        // --- BeforeUnload Prompt ---
+        function handleBeforeUnload(event) {
+             if (isLocked) {
+                const message = "Bạn không thể rời khỏi trang này khi đang bị khoá.";
+                event.preventDefault(); // Standard practice
+                event.returnValue = message; // For older browsers / some modern ones
+                return message; // For some browsers
+            }
+            // If not locked, return undefined to allow navigation/closing
+            return undefined;
+        }
+
+
+        // --- Initialization & Visibility Handling ---
+        console.log(`Device Type: ${isMobile ? 'Mobile/Touch' : 'Desktop'}`);
+
+        // Auto-lock on load
+        // Ensure the DOM is ready before trying to lock
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', lockDevice);
+        } else {
+             // DOM is already ready, lock immediately
+             lockDevice();
+        }
+
+        document.addEventListener('visibilitychange', () => {
+          if (isLocked && isMobile) { // Only handle for locked mobile state
+             if (document.visibilityState === 'visible') {
+                console.log('Tab visible again, re-requesting Wake Lock.');
+                requestWakeLock(); // Try re-acquiring lock
+             } else {
+                 console.log('Tab hidden, Wake Lock might release.');
+                 // No need to manually release here; browser handles it. Releasing might hinder re-acquisition.
+             }
+          }
+        });
+
+        // Final cleanup attempt if page somehow unloads while locked
+         window.addEventListener('unload', () => {
+             if (isLocked) {
+                 // Release wake lock if possible (unload event is unreliable)
+                 releaseWakeLock(); // This might not execute fully
+             }
+         });
+        // --- JavaScript Ends Here ---
+    </script>
+
+</body>
+</html>
